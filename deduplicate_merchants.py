@@ -6,7 +6,8 @@ Groups similar merchant names from a dataset, producing two output files:
 - weak_matches.txt: lower-confidence clusters (similarity 0.65–0.78, same industria, shared acquirer via fallback)
 
 Usage:
-    python deduplicate_merchants.py <input_file>
+    1. Set the INPUT_FILE variable below to your dataset path.
+    2. Run:  python deduplicate_merchants.py
 
 Supported input formats: .csv, .xlsx, .xls
 """
@@ -18,6 +19,12 @@ import string
 from difflib import SequenceMatcher
 
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Input file — change this path to point to your dataset
+# ---------------------------------------------------------------------------
+INPUT_FILE = "datos.xlsx"
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +320,10 @@ def write_output(path: str, groups: list):
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python deduplicate_merchants.py <input_file>")
-        print("  Supported formats: .csv, .xlsx, .xls")
-        sys.exit(1)
-    run(sys.argv[1])
+    if not os.path.isfile(INPUT_FILE):
+        sys.exit(
+            f"Error: Input file not found: '{INPUT_FILE}'\n"
+            f"Please set the INPUT_FILE variable at the top of the script "
+            f"to a valid .csv, .xlsx, or .xls file path."
+        )
+    run(INPUT_FILE)

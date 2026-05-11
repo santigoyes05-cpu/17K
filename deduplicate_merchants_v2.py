@@ -263,7 +263,7 @@ def run(input_path: str):
     print(f"Weak matches:   {len(weak_groups)} clusters -> {weak_path}")
 
     # Build and write corrected database
-    corrected = build_corrected_df(df, uf, norm_names, n)
+    corrected = build_corrected_df(df, uf, norm_names, n, cities)
     corrected_path = write_corrected_db(corrected, input_path)
     print(f"Corrected DB:   {n} rows -> {len(corrected)} rows -> {corrected_path}")
 
@@ -283,7 +283,30 @@ def write_output(path: str, groups: list):
 _NUMERIC_COLS = {"apv_ma_2025", "trx_ma_2025"}
 
 
-def build_corrected_df(df: pd.DataFrame, uf, norm_names: list, n: int) -> pd.DataFrame:
+def strip_locations(name: str, cities: set) -> str:
+    """Remove city/location tokens from a name while preserving the rest."""
+    if not isinstance(name, str):
+        return ""
+    text = name.strip()
+    tokens = text.split()
+    filtered = [t for t in tokens if t.upper() not in cities]
+    # If stripping removed everything, keep the original
+    return " ".join(filtered) if filtered else text
+
+
+def pick_longest_name(indices: list, df: pd.DataFrame, cities: set) -> str:
+    """Pick the longest original name after stripping cities/locations."""
+    best = ""
+    for i in indices:
+        original = str(df.iloc[i].get("canonical_name", "")).strip()
+        cleaned = strip_locations(original, cities)
+        if len(cleaned) > len(best):
+            best = cleaned
+    return best
+
+
+def build_corrected_df(df: pd.DataFrame, uf, norm_names: list, n: int,
+                       cities: set) -> pd.DataFrame:
     roots = [uf.find(i) for i in range(n)]
 
     groups: dict[int, list[int]] = {}
@@ -296,7 +319,9 @@ def build_corrected_df(df: pd.DataFrame, uf, norm_names: list, n: int) -> pd.Dat
     for root, indices in groups.items():
         if len(indices) == 1:
             row = df.iloc[indices[0]].copy()
-            row["canonical_name"] = norm_names[indices[0]] or row["canonical_name"]
+            row["canonical_name"] = strip_locations(
+                str(row["canonical_name"]), cities
+            ) or row["canonical_name"]
             result_rows.append(row)
             continue
 
@@ -305,14 +330,13 @@ def build_corrected_df(df: pd.DataFrame, uf, norm_names: list, n: int) -> pd.Dat
         for col in numeric_cols_present:
             sub[col] = pd.to_numeric(sub[col], errors="coerce")
 
-        # Dominant row = largest apv_ma_2025
         if "apv_ma_2025" in sub.columns:
             dominant_idx = sub["apv_ma_2025"].idxmax()
         else:
             dominant_idx = sub.index[0]
 
         new_row = sub.loc[dominant_idx].copy()
-        new_row["canonical_name"] = norm_names[root]
+        new_row["canonical_name"] = pick_longest_name(indices, df, cities)
 
         for col in numeric_cols_present:
             new_row[col] = sub[col].sum()

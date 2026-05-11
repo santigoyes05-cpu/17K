@@ -1,9 +1,10 @@
 """
 Merchant Name Deduplication Script
 ===================================
-Groups similar merchant names from a dataset, producing two output files:
+Groups similar merchant names from a dataset, producing three outputs:
 - strong_matches.txt: high-confidence clusters (similarity >= 0.78, same industria, same adquirente_principal)
 - weak_matches.txt: lower-confidence clusters (similarity 0.65–0.78, same industria, shared acquirer via fallback)
+- corrected_<input_filename>: consolidated dataset with one row per merchant group
 
 Usage:
     1. Set the INPUT_FILE variable below to your dataset path.
@@ -306,6 +307,11 @@ def run(input_path: str):
     write_output(weak_path, weak_groups)
     print(f"Weak matches:   {len(weak_groups)} clusters -> {weak_path}")
 
+    # Build and write corrected database
+    corrected = build_corrected_df(df, uf, norm_names, n)
+    corrected_path = write_corrected_db(corrected, input_path)
+    print(f"Corrected DB:   {n} rows -> {len(corrected)} rows -> {corrected_path}")
+
 
 def write_output(path: str, groups: list):
     with open(path, "w", encoding="utf-8") as f:
@@ -314,6 +320,75 @@ def write_output(path: str, groups: list):
                 f.write(name + "\n")
             if idx < len(groups) - 1:
                 f.write(CLUSTER_SEPARATOR + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Corrected database helpers
+# ---------------------------------------------------------------------------
+_NUMERIC_COLS = {"num_sucursales", "fact_mc_2025", "trx_2025"}
+
+
+def build_corrected_df(df: pd.DataFrame, uf, norm_names: list, n: int) -> pd.DataFrame:
+    """Consolidate clustered rows into one row per merchant group."""
+    # Map each row to its cluster root
+    roots = [uf.find(i) for i in range(n)]
+
+    # Group row indices by root
+    groups: dict[int, list[int]] = {}
+    for i, r in enumerate(roots):
+        groups.setdefault(r, []).append(i)
+
+    numeric_cols_present = [c for c in _NUMERIC_COLS if c in df.columns]
+    text_cols = [c for c in df.columns if c not in _NUMERIC_COLS and c != "comercio"]
+
+    result_rows = []
+    for root, indices in groups.items():
+        if len(indices) == 1:
+            row = df.iloc[indices[0]].copy()
+            row["comercio"] = norm_names[indices[0]] or row["comercio"]
+            result_rows.append(row)
+            continue
+
+        sub = df.iloc[indices].copy()
+
+        # Convert numeric columns for aggregation
+        for col in numeric_cols_present:
+            sub[col] = pd.to_numeric(sub[col], errors="coerce")
+
+        # Find dominant row (largest fact_mc_2025) for text columns
+        if "fact_mc_2025" in sub.columns:
+            dominant_idx = sub["fact_mc_2025"].idxmax()
+        else:
+            dominant_idx = sub.index[0]
+
+        new_row = sub.loc[dominant_idx].copy()
+        new_row["comercio"] = norm_names[root]
+
+        # Sum numeric columns
+        for col in numeric_cols_present:
+            new_row[col] = sub[col].sum()
+
+        result_rows.append(new_row)
+
+    corrected = pd.DataFrame(result_rows, columns=df.columns)
+    corrected.reset_index(drop=True, inplace=True)
+    return corrected
+
+
+def write_corrected_db(corrected: pd.DataFrame, input_path: str):
+    """Write the corrected database in the same format as the input."""
+    out_dir = os.path.dirname(input_path) or "."
+    base = os.path.basename(input_path)
+    out_name = f"corrected_{base}"
+    out_path = os.path.join(out_dir, out_name)
+
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext == ".csv":
+        corrected.to_csv(out_path, index=False, encoding="utf-8")
+    else:
+        corrected.to_excel(out_path, index=False)
+
+    return out_path
 
 
 # ---------------------------------------------------------------------------

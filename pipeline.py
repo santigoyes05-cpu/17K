@@ -342,6 +342,203 @@ def compute_ttfu_distribution(
 
 
 # ---------------------------------------------------------------------------
+# 3b. First-usage, channel, and industry analytics  (§6, §7, §8)
+# ---------------------------------------------------------------------------
+
+def _first_transaction_per_customer(enriched_tx: pd.DataFrame) -> pd.DataFrame:
+    """
+    One row per customer carrying the attributes of their first transaction.
+    Used by §6.3, §7, §8.
+    """
+    cols = [
+        "id_cliente", "PERIODO", "Tipo_Transaccion",
+        "COD_ESTABLECIMIENTO", "industry", "super_industry", "MONTO_TX",
+    ]
+    base = enriched_tx.dropna(subset=["id_cliente", "PERIODO"])[cols].copy()
+    base = base.sort_values(["id_cliente", "PERIODO"], kind="mergesort")
+    first = base.drop_duplicates(subset=["id_cliente"], keep="first").reset_index(drop=True)
+
+    return first.rename(columns={
+        "PERIODO":             "first_tx_date",
+        "Tipo_Transaccion":    "first_tx_Tipo_Transaccion",
+        "COD_ESTABLECIMIENTO": "first_tx_COD_ESTABLECIMIENTO",
+        "industry":            "first_tx_industry",
+        "super_industry":      "first_tx_super_industry",
+        "MONTO_TX":            "first_tx_MONTO_TX",
+    })
+
+
+def compute_first_usage_metrics(enriched_tx: pd.DataFrame) -> dict:
+    """
+    §6.1 + §6.2 — customer-level (not transaction-level) usage by channel.
+    """
+    print("\n--- Computing first-usage metrics (§6.1, §6.2) ---")
+
+    df = enriched_tx.dropna(subset=["id_cliente"])
+    by_cust = df.groupby("id_cliente")["Tipo_Transaccion"].agg(set)
+
+    has_pos = by_cust.apply(lambda s: "POS" in s)
+    has_atm = by_cust.apply(lambda s: "ATM" in s)
+
+    metrics = {
+        "customers_with_first_usage": int(by_cust.shape[0]),
+        "pos_customers":              int(has_pos.sum()),
+        "atm_customers":              int(has_atm.sum()),
+        "pos_only_customers":         int((has_pos & ~has_atm).sum()),
+        "atm_only_customers":         int((~has_pos & has_atm).sum()),
+        "both_pos_and_atm_customers": int((has_pos & has_atm).sum()),
+    }
+    for k, v in metrics.items():
+        print(f"  {k}: {v:,}")
+    return metrics
+
+
+def compute_first_usage_channel(first_tx_df: pd.DataFrame) -> dict:
+    """§6.3 — channel of each customer's chronologically first transaction."""
+    print("\n--- Computing first-usage channel (§6.3) ---")
+    counts = first_tx_df["first_tx_Tipo_Transaccion"].value_counts(dropna=False)
+    metrics = {
+        "first_usage_pos_customers": int(counts.get("POS", 0)),
+        "first_usage_atm_customers": int(counts.get("ATM", 0)),
+    }
+    for k, v in metrics.items():
+        print(f"  {k}: {v:,}")
+    return metrics
+
+
+def compute_first_purchase_industry(first_tx_df: pd.DataFrame) -> pd.DataFrame:
+    """§7 — industries where customers made their first transaction."""
+    print("\n--- Computing first-purchase industry (§7) ---")
+    table = (
+        first_tx_df.groupby("first_tx_industry", dropna=False)
+        .agg(
+            num_customers = ("id_cliente",        "nunique"),
+            avg_ticket    = ("first_tx_MONTO_TX", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"first_tx_industry": "industry"})
+        .sort_values("num_customers", ascending=False)
+        .reset_index(drop=True)
+    )
+    print(f"  Industries: {len(table):,}")
+    return table
+
+
+def compute_first_pos_purchase(first_tx_df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    """§8 — average ticket of the first POS purchase (overall + by industry)."""
+    print("\n--- Computing first POS purchase (§8) ---")
+    pos_first = first_tx_df[first_tx_df["first_tx_Tipo_Transaccion"] == "POS"].copy()
+
+    overall = {
+        "first_pos_customers":      int(pos_first["id_cliente"].nunique()),
+        "avg_first_pos_ticket":     float(pos_first["first_tx_MONTO_TX"].mean()) if len(pos_first) else float("nan"),
+    }
+    print(f"  first_pos_customers: {overall['first_pos_customers']:,}")
+    print(f"  avg_first_pos_ticket: {overall['avg_first_pos_ticket']:.2f}")
+
+    by_industry = (
+        pos_first.groupby("first_tx_industry", dropna=False)
+        .agg(
+            num_customers = ("id_cliente",        "nunique"),
+            avg_ticket    = ("first_tx_MONTO_TX", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"first_tx_industry": "industry"})
+        .sort_values("num_customers", ascending=False)
+        .reset_index(drop=True)
+    )
+    return overall, by_industry
+
+
+# ---------------------------------------------------------------------------
+# 3c. POS analytics  (§10)
+# ---------------------------------------------------------------------------
+
+def compute_pos_total_metrics(pos_tx: pd.DataFrame) -> dict:
+    """§10.1 — portfolio-wide POS metrics."""
+    print("\n--- Computing POS total metrics (§10.1) ---")
+    total_revenue  = float(pos_tx["MONTO_TX"].sum())
+    total_tx       = int(len(pos_tx))
+    n_customers    = int(pos_tx["id_cliente"].nunique())
+
+    metrics = {
+        "total_pos_revenue":              total_revenue,
+        "total_pos_transactions":         total_tx,
+        "pos_customers":                  n_customers,
+        "avg_ticket_pos":                 total_revenue / total_tx     if total_tx     else float("nan"),
+        "avg_revenue_per_customer_pos":   total_revenue / n_customers  if n_customers  else float("nan"),
+        "avg_transactions_per_customer_pos": total_tx / n_customers    if n_customers  else float("nan"),
+    }
+    for k, v in metrics.items():
+        print(f"  {k}: {v:,.2f}" if isinstance(v, float) else f"  {k}: {v:,}")
+    return metrics
+
+
+def compute_pos_customer_level_metrics(pos_tx: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """§10.2 — per-customer POS behavior + aggregate means."""
+    print("\n--- Computing POS customer-level metrics (§10.2) ---")
+
+    per_customer = (
+        pos_tx.groupby("id_cliente")
+        .agg(
+            pos_tx_count = ("MONTO_TX", "size"),
+            pos_spend    = ("MONTO_TX", "sum"),
+            avg_ticket   = ("MONTO_TX", "mean"),
+        )
+        .reset_index()
+    )
+
+    aggregates = {
+        "avg_transactions_per_customer_pos": float(per_customer["pos_tx_count"].mean()) if len(per_customer) else float("nan"),
+        "avg_spend_per_customer_pos":        float(per_customer["pos_spend"].mean())    if len(per_customer) else float("nan"),
+    }
+    print(f"  customers: {len(per_customer):,}")
+    for k, v in aggregates.items():
+        print(f"  {k}: {v:,.2f}")
+    return per_customer, aggregates
+
+
+def compute_pos_industry_rankings(
+    pos_tx: pd.DataFrame,
+    top_n: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """§10.3 — POS rankings by revenue and by transaction count."""
+    print("\n--- Computing POS industry rankings (§10.3) ---")
+
+    grouped = (
+        pos_tx.groupby("industry", dropna=False)
+        .agg(
+            total_pos_revenue      = ("MONTO_TX",   "sum"),
+            total_pos_transactions = ("MONTO_TX",   "size"),
+            avg_pos_ticket         = ("MONTO_TX",   "mean"),
+        )
+        .reset_index()
+    )
+
+    revenue_ranking = grouped.sort_values("total_pos_revenue",      ascending=False).reset_index(drop=True)
+    frequency_ranking = grouped.sort_values("total_pos_transactions", ascending=False).reset_index(drop=True)
+
+    if top_n is not None:
+        revenue_ranking   = revenue_ranking.head(top_n)
+        frequency_ranking = frequency_ranking.head(top_n)
+
+    print(f"  Industries: {len(grouped):,}")
+    return revenue_ranking, frequency_ranking
+
+
+def _validate_pos_consistency(pos_total: dict, customer_level: pd.DataFrame) -> None:
+    """§12 — total POS revenue must equal sum of customer-level POS spend."""
+    total_from_aggregate = pos_total["total_pos_revenue"]
+    total_from_customers = float(customer_level["pos_spend"].sum())
+    diff = abs(total_from_aggregate - total_from_customers)
+    print(
+        f"  [POS validation] total_pos_revenue={total_from_aggregate:,.2f}  "
+        f"sum(pos_spend)={total_from_customers:,.2f}  diff={diff:,.6f}"
+    )
+    assert diff < 1e-3, "POS revenue inconsistency between aggregate and customer-level totals"
+
+
+# ---------------------------------------------------------------------------
 # 4. Validation utilities
 # ---------------------------------------------------------------------------
 
@@ -393,17 +590,45 @@ def run_pipeline(
     top_municipalities_table = compute_top_municipalities(enriched_demographics, department_distribution)
     ttfu_distribution_table  = compute_ttfu_distribution(enriched_demographics, enriched_transactions)
 
+    # First-usage / channel / industry analytics (§6, §7, §8)
+    first_tx_df             = _first_transaction_per_customer(enriched_transactions)
+    first_usage_metrics     = compute_first_usage_metrics(enriched_transactions)
+    first_usage_channel     = compute_first_usage_channel(first_tx_df)
+    first_purchase_industry = compute_first_purchase_industry(first_tx_df)
+    first_pos_purchase_overall, first_pos_purchase_by_industry = compute_first_pos_purchase(first_tx_df)
+
+    # POS analytics (§10) — single shared filter
+    pos_tx = enriched_transactions[enriched_transactions["Tipo_Transaccion"] == "POS"].copy()
+    pos_total_metrics                              = compute_pos_total_metrics(pos_tx)
+    pos_customer_level_metrics, pos_customer_aggs  = compute_pos_customer_level_metrics(pos_tx)
+    pos_industry_revenue_ranking, pos_industry_frequency_ranking = compute_pos_industry_rankings(pos_tx)
+
+    # §12 consistency check
+    print("\n--- POS consistency validation (§12) ---")
+    _validate_pos_consistency(pos_total_metrics, pos_customer_level_metrics)
+
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")
     print("=" * 60)
 
     return {
-        "enriched_transactions":         enriched_transactions,
-        "enriched_demographics":         enriched_demographics,
-        "card_metrics":                  card_metrics,
-        "department_distribution_table": department_distribution,
-        "top_municipalities_table":      top_municipalities_table,
-        "ttfu_distribution_table":       ttfu_distribution_table,
+        "enriched_transactions":            enriched_transactions,
+        "enriched_demographics":            enriched_demographics,
+        "card_metrics":                     card_metrics,
+        "department_distribution_table":    department_distribution,
+        "top_municipalities_table":         top_municipalities_table,
+        "ttfu_distribution_table":          ttfu_distribution_table,
+        "first_tx_df":                      first_tx_df,
+        "first_usage_metrics":              first_usage_metrics,
+        "first_usage_channel":              first_usage_channel,
+        "first_purchase_industry":          first_purchase_industry,
+        "first_pos_purchase_overall":       first_pos_purchase_overall,
+        "first_pos_purchase_by_industry":   first_pos_purchase_by_industry,
+        "pos_total_metrics":                pos_total_metrics,
+        "pos_customer_level_metrics":       pos_customer_level_metrics,
+        "pos_customer_aggregates":          pos_customer_aggs,
+        "pos_industry_revenue_ranking":     pos_industry_revenue_ranking,
+        "pos_industry_frequency_ranking":   pos_industry_frequency_ranking,
     }
 
 
@@ -422,3 +647,15 @@ if __name__ == "__main__":
 
     print("\n--- ttfu_distribution_table (first 20 days) ---")
     print(results["ttfu_distribution_table"].head(20).to_string(index=False))
+
+    print("\n--- first_purchase_industry (top 10) ---")
+    print(results["first_purchase_industry"].head(10).to_string(index=False))
+
+    print("\n--- first_pos_purchase_by_industry (top 10) ---")
+    print(results["first_pos_purchase_by_industry"].head(10).to_string(index=False))
+
+    print("\n--- pos_industry_revenue_ranking (top 10) ---")
+    print(results["pos_industry_revenue_ranking"].head(10).to_string(index=False))
+
+    print("\n--- pos_industry_frequency_ranking (top 10) ---")
+    print(results["pos_industry_frequency_ranking"].head(10).to_string(index=False))
